@@ -31,8 +31,7 @@ import org.apache.zookeeper.KeeperException.Code;
 //		you manage the code more modularly.
 //	REMEMBER !! Managers and Workers are also clients of ZK and the ZK client library is single thread - Watches & CallBacks should not be used for time consuming tasks.
 //		In particular, if the process is a worker, Watches & CallBacks should only be used to assign the "work" to a separate thread inside your program.
-public class DistProcess implements Watcher
-																		, AsyncCallback.ChildrenCallback
+public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
 {
 	ZooKeeper zk;
 	String zkServer, pinfo;
@@ -45,6 +44,7 @@ public class DistProcess implements Watcher
 		pinfo = ManagementFactory.getRuntimeMXBean().getName();
 		System.out.println("DISTAPP : ZK Connection information : " + zkServer);
 		System.out.println("DISTAPP : Process information : " + pinfo);
+		
 	}
 
 	void startProcess() throws IOException, UnknownHostException, KeeperException, InterruptedException
@@ -54,16 +54,22 @@ public class DistProcess implements Watcher
 
 	void initalize() {
     try {
-        if (zk.exists("/dist30/manager", false) != null) {
-            isManager = false; // Existing manager present, become a worker
-            
-	    } else {
-            runForManager(); // No existing manager, become the manager
+		Stat managerStat = zk.exists("/dist30/manager", this);
+		
+		if (managerStat == null) {
+            // The manager znode does not exist, so this instance becomes the manager.
+            runForManager();
             isManager = true;
-			registerAsWorker(); // Register as a worker
-            getWorkers(); // Get the list of existing workers
-        }
-        getTasks(); // Install monitoring on any new tasks that will be created.
+			System.out.println("watchtasks");
+            getTasks();
+			System.out.println("watchworkers");
+            watchWorkers();
+		}
+		else{
+			registerAsWorker();
+			}
+		
+// Install monitoring on any new tasks that will be created.
         // TODO monitor for worker tasks?
 		
     } catch (NodeExistsException nee) {
@@ -78,10 +84,15 @@ public class DistProcess implements Watcher
 
     System.out.println("DISTAPP : Role : " + " I will be functioning as " + (isManager ? "manager" : "worker"));
 }
+void watchWorkers() {
+            // Watch for changes in the list of workers
+            zk.getChildren("/dist30/workers", this, this, null);
+      
+    }
 
-private void getWorkers() throws KeeperException, InterruptedException {
-    zk.getChildren("/dist30/workers", true, workersChildrenCallback, null);
-}
+
+
+
 
 
 
@@ -100,11 +111,16 @@ private void getWorkers() throws KeeperException, InterruptedException {
 	}
 	void registerAsWorker() throws UnknownHostException, KeeperException, InterruptedException {
     
-	String workerPath = "/dist30/workers/worker-" + pinfo; // Unique identifier for the worker
-    zk.create(workerPath, pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
-}
+			String workerPath = "/dist30/workers/worker-" + pinfo; // Unique identifier for the worker
+			zk.create(workerPath, pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
+			// Mark the worker as idle initially
+			zk.create(workerPath + "/status", "IDLE".getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
 
-	public void process(WatchedEvent e)
+}    
+
+
+
+public void process(WatchedEvent e)
 	{
 		//Get watcher notifications.
 
@@ -117,6 +133,7 @@ private void getWorkers() throws KeeperException, InterruptedException {
 		//   does the time consuming "work" and notify that thread from here.
 
 		System.out.println("DISTAPP : Event received : " + e);
+		System.out.println("Event path" + e.getPath());
 
 		if(e.getType() == Watcher.Event.EventType.None) // This seems to be the event type associated with connections.
 		{
@@ -134,6 +151,12 @@ private void getWorkers() throws KeeperException, InterruptedException {
 			// There has been changes to the children of the node.
 			// We are going to re-install the Watch as well as request for the list of the children.
 			getTasks();
+		}
+		if(e.getType() == Watcher.Event.EventType.NodeChildrenChanged && e.getPath().equals("/dist30/workers"))
+		{
+			// There has been changes to the children of the node.
+			// We are going to re-install the Watch as well as request for the list of the children.
+			watchWorkers();
 		}
 	}
 
@@ -156,6 +179,11 @@ private void getWorkers() throws KeeperException, InterruptedException {
 		//		Also have a mechanism to assign these tasks to a "Worker" process.
 		//		The worker must invoke the "compute" function of the Task send by the client.
 		//What to do if you do not have a free worker process?
+        if (path.equals("/dist30/workers")) {
+        System.out.println("DISTAPP : Workers changed: " + children);
+		
+    }
+	else{
 		System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
 		for(String c: children)
 		{
@@ -185,7 +213,7 @@ private void getWorkers() throws KeeperException, InterruptedException {
 
 				// Store it inside the result node.
 				zk.create("/dist30/tasks/"+c+"/result", taskSerial, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-				//zk.create("/dist30/tasks/"+c+"/result", ("Hello from "+pinfo).getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+				//zk.create("/distXX/tasks/"+c+"/result", ("Hello from "+pinfo).getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
 			}
 			catch(NodeExistsException nee){System.out.println(nee);}
 			catch(KeeperException ke){System.out.println(ke);}
@@ -194,7 +222,7 @@ private void getWorkers() throws KeeperException, InterruptedException {
 			catch(ClassNotFoundException cne){System.out.println(cne);}
 		}
 	}
-
+	}
 	public static void main(String args[]) throws Exception
 	{
 		//Create a new process
