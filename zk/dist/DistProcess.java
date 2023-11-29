@@ -31,7 +31,12 @@ import org.apache.zookeeper.KeeperException.Code;
 //		you manage the code more modularly.
 //	REMEMBER !! Managers and Workers are also clients of ZK and the ZK client library is single thread - Watches & CallBacks should not be used for time consuming tasks.
 //		In particular, if the process is a worker, Watches & CallBacks should only be used to assign the "work" to a separate thread inside your program.
-public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
+
+
+
+
+
+public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, AsyncCallback.StatCallback
 {
 	ZooKeeper zk;
 	String zkServer, pinfo;
@@ -53,40 +58,17 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
 	}
 
 	void initalize() {
-    try {
-		Stat managerStat = zk.exists("/dist30/manager", this);
+    
+		zk.exists("/dist30/manager", true, this ,null);
 		
-		if (managerStat == null) {
-            // The manager znode does not exist, so this instance becomes the manager.
-            runForManager();
-            isManager = true;
-			System.out.println("watchtasks");
-            getTasks();
-			System.out.println("watchworkers");
-            watchWorkers();
-		}
-		else{
-			registerAsWorker();
-			}
 		
-// Install monitoring on any new tasks that will be created.
-        // TODO monitor for worker tasks?
 		
-    } catch (NodeExistsException nee) {
-        isManager = false;
-    } catch (UnknownHostException uhe) {
-        System.out.println(uhe);
-    } catch (KeeperException ke) {
-        System.out.println(ke);
-    } catch (InterruptedException ie) {
-        System.out.println(ie);
-    }
+		
 
-    System.out.println("DISTAPP : Role : " + " I will be functioning as " + (isManager ? "manager" : "worker"));
 }
 void watchWorkers() {
             // Watch for changes in the list of workers
-            zk.getChildren("/dist30/workers", this, this, null);
+            zk.getChildren("/dist30/workers", true, this, null);
       
     }
 
@@ -99,7 +81,7 @@ void watchWorkers() {
 	// Manager fetching task znodes...
 	void getTasks()
 	{
-		zk.getChildren("/dist30/tasks", this, this, null);  
+		zk.getChildren("/dist30/tasks", true, this, null);  
 	}
 
 	// Try to become the manager.
@@ -109,14 +91,16 @@ void watchWorkers() {
 		// This is an example of Synchronous API invocation as the function waits for the execution and no callback is involved..
 		zk.create("/dist30/manager", pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
 	}
-	void registerAsWorker() throws UnknownHostException, KeeperException, InterruptedException {
+	private void registerAsWorker() throws KeeperException, InterruptedException {
+    // Create a worker znode
+    String workerPath = "/dist30/workers/worker-" + pinfo; // Unique identifier for the worker
+    zk.create(workerPath, pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
     
-			String workerPath = "/dist30/workers/worker-" + pinfo; // Unique identifier for the worker
-			zk.create(workerPath, pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
-			// Mark the worker as idle initially
-			zk.create(workerPath + "/status", "IDLE".getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-
-}    
+    // Mark the worker as idle initially
+    String statusPath = workerPath + "/status";
+    zk.create(statusPath, "IDLE".getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+    System.out.println("DISTAPP : Created worker status znode: " + statusPath);
+}  
 
 
 
@@ -158,7 +142,34 @@ public void process(WatchedEvent e)
 			// We are going to re-install the Watch as well as request for the list of the children.
 			watchWorkers();
 		}
+	
+
+
 	}
+void initialize() {
+    zk.exists("/dist30/manager", this, this, null);
+}
+
+public void processResult(int rc, String path, Object ctx, Stat stat) {
+    try {
+        if (rc == KeeperException.Code.NONODE.intValue()) {
+            // The manager znode does not exist, so this instance becomes the manager.
+            runForManager();
+            isManager = true;
+            System.out.println("watchtasks");
+            getTasks();
+            System.out.println("watchworkers");
+            watchWorkers();
+        } else if (rc == KeeperException.Code.OK.intValue()) {
+            registerAsWorker();
+        }
+
+        System.out.println("DISTAPP : Role : I will be functioning as " + (isManager ? "manager" : "worker"));
+    } catch (Exception e) {
+        System.out.println(e);
+    }
+}
+
 
 	//Asynchronous callback that is invoked by the zk.getChildren request.
 	public void processResult(int rc, String path, Object ctx, List<String> children)
@@ -181,7 +192,6 @@ public void process(WatchedEvent e)
 		//What to do if you do not have a free worker process?
         if (path.equals("/dist30/workers")) {
         System.out.println("DISTAPP : Workers changed: " + children);
-		
     }
 	else{
 		System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
