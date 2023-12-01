@@ -33,9 +33,6 @@ import org.apache.zookeeper.KeeperException.Code;
 //		In particular, if the process is a worker, Watches & CallBacks should only be used to assign the "work" to a separate thread inside your program.
 
 
-
-
-
 public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, AsyncCallback.StatCallback
 {
 	ZooKeeper zk;
@@ -61,22 +58,14 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
     
 		zk.exists("/dist30/manager", true, this ,null);
 		
-		
-		
-		
-
-}
-void watchWorkers() {
-            // Watch for changes in the list of workers
-            zk.getChildren("/dist30/workers", true, this, null);
-      
     }
 
 
+    void watchWorkers() {
+        // Watch for changes in the list of workers
+        zk.getChildren("/dist30/workers", true, this, null);
 
-
-
-
+    }
 
 	// Manager fetching task znodes...
 	void getTasks()
@@ -102,9 +91,155 @@ void watchWorkers() {
     System.out.println("DISTAPP : Created worker status znode: " + statusPath);
 }  
 
+private void addToIdleWorkersQueue(String worker) {
+    String idleWorkerPath = "/dist30/idleWorkers/worker-" + worker;
+    try {
+        // make an ephemeral node for the idle worker
+        zk.create(idleWorkerPath, new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
+        System.out.println("Worker " + worker + " added to idle queue");
+    } catch (KeeperException | InterruptedException e) {
+        e.printStackTrace();
+    }
+}
+
+// private void addToTaskQueue(String task) {
+//     String taskQueuePath = "/dist30/tasks/task-" + task;
+//     try {
+//         zk.create(taskQueuePath, new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+//         System.out.println("Task " + task + " added to task queue");
+//     } catch (KeeperException | InterruptedException e) {
+//         e.printStackTrace();
+//     }
+// }
+
+// if you know a worker is idle 
+private void assignTaskToWorker(String workerPath) {
+    try {
+        List<String> tasks = zk.getChildren("/dist30/tasks", false);
+
+        // get oldest task first
+        String task = tasks.get(0); 
+        String taskPath = "/dist30/tasks/task-" + task;
+        // get the task data
+        byte[] taskData = zk.getData(taskPath, false, null);
+        // TODO: assign the task to the worker
+
+        
+
+        // remove task from the task queue
+        zk.delete(taskPath, -1); 
+        // update worker status to busy
+        String workerStatusPath = workerPath + "/status";
+        zk.setData(workerStatusPath, "BUSY".getBytes(), -1); 
+        //set watcher on worker status
+        zk.getData(workerStatusPath, true, null);
+    } catch (KeeperException | InterruptedException e) {
+        e.printStackTrace();
+    }
+}
+
+// if you know a task is available 
+private void assignWorkerToTask(String taskPath) {
+    try {
+
+        // pull a worker from the worker idle queue 
+        List<String> idleWorkers = zk.getChildren("/dist30/idleWorkers", false);
+        String worker = idleWorkers.get(0); 
+        // TODO: assign the worker to the task 
 
 
-public void process(WatchedEvent e)
+        // remove the worker from the idle queue 
+        zk.delete("/dist30/idleWorkers/worker-" + worker, -1); 
+        // change status from idle to busy
+        String statusPath = "/dist30/workers/worker-" + worker + "/status";
+        zk.setData(statusPath, "BUSY".getBytes(), -1);
+        // set a watcher on the status 
+        zk.getData(statusPath, true, null);
+
+    } catch (KeeperException | InterruptedException e) {
+        e.printStackTrace();
+    }
+}
+
+
+private void handleWorkerChange(Watcher.Event e) {
+
+    try {
+
+        List<String> idleWorkers = zk.getChildren("/dist30/idleWorkers", false);
+        String workerPath = e.getPath(); 
+        byte[] workerData = zk.getData(workerPath, false, null);
+        String workerId = new String(workerData, StandardCharsets.UTF_8);
+
+        List<String> taskQueue = zk.getChildren("/dist30/tasks", false);
+
+        switch (e.getType()) {
+            case NodeCreated:
+                System.out.println("Node created at path: " + workerPath);
+                // if there's currently no tasks to be assigned 
+                // add worker to idle workers queue 
+                if (taskQueue.isEmpty) {
+                    addToIdleWorkersQueue(workerId); 
+                } else {
+                    assignTaskToWorker(workerId); 
+                }
+                break; 
+            // if a node was deleted, since the idle worker node created is ephemeral
+            // node will be automatically deleted
+            // TODO: when will the data of a worker node change?  
+            case NodeDataChanged:
+                System.out.println("Data changed at path: " + workerPath);
+                break;
+            // this means the status for a worker node changed
+            case NodeChildrenChanged:
+                System.out.println("Status for Worker changed at path: " + workerPath);
+
+                String workerStatus = String(zk.getData(workerPath + "/status", false, null)); 
+
+                if (workerStatus.equals("IDLE") && !taskQueue.isEmpty) {
+                    assignWorkerToTask(workerId); 
+                } else {
+                    addToIdleWorkersQueue(workerId); 
+                }
+                break;
+            default:
+                // handle other types of events
+                break;
+        }
+
+    } catch (KeeperException | InterruptedException e) {
+        e.printStackTrace();
+    }
+}
+
+
+private void handleTaskChange(Watcher.Event e) {
+    try {
+
+        List<String> tasksQueue = zk.getChildren("/dist30/tasks", false);
+        String taskPath = e.getPath(); 
+        byte[] taskData = zk.getData(taskPath, false, null);
+        String taskId = new String(taskData, StandardCharsets.UTF_8);
+
+
+        switch (e.getType()) {
+            // new task is created 
+            // check if there's any idle watchers 
+            // if not, add it to the queue 
+            case NodeCreated: 
+                if (!idleWorkers.isEmpty) {
+                    assignTaskToWorker(taskId)
+                }
+        }
+
+    } catch (KeeperException | InterruptedException e) {
+        e.printStackTrace();
+    }
+}
+
+
+
+public void process(WatchedEvent e) 
 	{
 		//Get watcher notifications.
 
@@ -126,6 +261,7 @@ public void process(WatchedEvent e)
 			{
 				initalize();
 				initalized = true;
+
 			}
 		}
 
@@ -135,17 +271,29 @@ public void process(WatchedEvent e)
 			// There has been changes to the children of the node.
 			// We are going to re-install the Watch as well as request for the list of the children.
 			getTasks();
+
+            // if a new task has been created
+            // check if there's any idle workers to allocate the job to
+            // otherwise add the job to the task queue 
+            // remove the job from the task queue when it's allocated to a worker
+            handleTaskChange(e); 
 		}
 		if(e.getType() == Watcher.Event.EventType.NodeChildrenChanged && e.getPath().equals("/dist30/workers"))
 		{
 			// There has been changes to the children of the node.
 			// We are going to re-install the Watch as well as request for the list of the children.
 			watchWorkers();
-		}
-	
 
+            // if a new worker node has been created, & there's no tasks to process
+            // add it in the idle queue
+            // otherwise assign a task to it 
+            // if a worker node has been deleted, check if it's part of the idle queue
+            // and remove it 
+            handleWorkerChange(e);
+		}
 
 	}
+
 void initialize() {
     zk.exists("/dist30/manager", this, this, null);
 }
@@ -191,47 +339,49 @@ public void processResult(int rc, String path, Object ctx, Stat stat) {
 		//		The worker must invoke the "compute" function of the Task send by the client.
 		//What to do if you do not have a free worker process?
         if (path.equals("/dist30/workers")) {
-        System.out.println("DISTAPP : Workers changed: " + children);
-    }
-	else{
-		System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
-		for(String c: children)
-		{
-			System.out.println(c);
-			try
-			{
-				//TODO There is quite a bit of worker specific activities here,
-				// that should be moved done by a process function as the worker.
+            System.out.println("DISTAPP : Workers changed: " + children);
+            // assign task to worker 
+            checkAndAssignTask(children); 
+        }
+	    else{
+            System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
+            for(String c: children)
+            {
+                System.out.println(c);
+                try
+                {
+                    //TODO There is quite a bit of worker specific activities here,
+                    // that should be moved done by a process function as the worker.
 
-				//TODO!! This is not a good approach, you should get the data using an async version of the API.
-				byte[] taskSerial = zk.getData("/dist30/tasks/"+c, false, null);
+                    //TODO!! This is not a good approach, you should get the data using an async version of the API.
+                    byte[] taskSerial = zk.getData("/dist30/tasks/" + c, false, null);
 
-				// Re-construct our task object.
-				ByteArrayInputStream bis = new ByteArrayInputStream(taskSerial);
-				ObjectInput in = new ObjectInputStream(bis);
-				DistTask dt = (DistTask) in.readObject();
+                    // Re-construct our task object.
+                    ByteArrayInputStream bis = new ByteArrayInputStream(taskSerial);
+                    ObjectInput in = new ObjectInputStream(bis);
+                    DistTask dt = (DistTask) in.readObject();
 
-				//Execute the task.
-				//TODO: Again, time consuming stuff. Should be done by some other thread and not inside a callback!
-				dt.compute();
-				
-				// Serialize our Task object back to a byte array!
-				ByteArrayOutputStream bos = new ByteArrayOutputStream();
-				ObjectOutputStream oos = new ObjectOutputStream(bos);
-				oos.writeObject(dt); oos.flush();
-				taskSerial = bos.toByteArray();
+                    //Execute the task.
+                    //TODO: Again, time consuming stuff. Should be done by some other thread and not inside a callback!
+                    dt.compute();
+                    
+                    // Serialize our Task object back to a byte array!
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                    ObjectOutputStream oos = new ObjectOutputStream(bos);
+                    oos.writeObject(dt); oos.flush();
+                    taskSerial = bos.toByteArray();
 
-				// Store it inside the result node.
-				zk.create("/dist30/tasks/"+c+"/result", taskSerial, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-				//zk.create("/distXX/tasks/"+c+"/result", ("Hello from "+pinfo).getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-			}
-			catch(NodeExistsException nee){System.out.println(nee);}
-			catch(KeeperException ke){System.out.println(ke);}
-			catch(InterruptedException ie){System.out.println(ie);}
-			catch(IOException io){System.out.println(io);}
-			catch(ClassNotFoundException cne){System.out.println(cne);}
-		}
-	}
+                    // Store it inside the result node.
+                    zk.create("/dist30/tasks/"+c+"/result", taskSerial, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                    //zk.create("/distXX/tasks/"+c+"/result", ("Hello from "+pinfo).getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                }
+                catch(NodeExistsException nee){System.out.println(nee);}
+                catch(KeeperException ke){System.out.println(ke);}
+                catch(InterruptedException ie){System.out.println(ie);}
+                catch(IOException io){System.out.println(io);}
+                catch(ClassNotFoundException cne){System.out.println(cne);}
+		    }
+	    }
 	}
 	public static void main(String args[]) throws Exception
 	{
