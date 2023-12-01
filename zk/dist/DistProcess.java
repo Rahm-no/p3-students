@@ -156,20 +156,20 @@ private void assignWorkerToTask(String taskPath) {
         // set a watcher on the status 
         zk.getData(statusPath, true, null);
 
-    } catch (KeeperException | InterruptedException e) {
-        e.printStackTrace();
+    } catch (KeeperException | InterruptedException exception) {
+        exception.printStackTrace();
     }
 }
 
 
-private void handleWorkerChange(Watcher.Event e) {
+private void handleWorkerChange(WatchedEvent e) {
 
     try {
 
         List<String> idleWorkers = zk.getChildren("/dist30/idleWorkers", false);
         String workerPath = e.getPath(); 
         byte[] workerData = zk.getData(workerPath, false, null);
-        String workerId = new String(workerData, StandardCharsets.UTF_8);
+        String workerId = new String(workerData);
 
         List<String> taskQueue = zk.getChildren("/dist30/tasks", false);
 
@@ -178,7 +178,7 @@ private void handleWorkerChange(Watcher.Event e) {
                 System.out.println("Node created at path: " + workerPath);
                 // if there's currently no tasks to be assigned 
                 // add worker to idle workers queue 
-                if (taskQueue.isEmpty) {
+                if (taskQueue.isEmpty()) {
                     addToIdleWorkersQueue(workerId); 
                 } else {
                     assignTaskToWorker(workerId); 
@@ -194,9 +194,9 @@ private void handleWorkerChange(Watcher.Event e) {
             case NodeChildrenChanged:
                 System.out.println("Status for Worker changed at path: " + workerPath);
 
-                String workerStatus = String(zk.getData(workerPath + "/status", false, null)); 
+                String workerStatus = new String(zk.getData(workerPath + "/status", false, null)); 
 
-                if (workerStatus.equals("IDLE") && !taskQueue.isEmpty) {
+                if (workerStatus.equals("IDLE") && !taskQueue.isEmpty()) {
                     assignWorkerToTask(workerId); 
                 } else {
                     addToIdleWorkersQueue(workerId); 
@@ -207,19 +207,19 @@ private void handleWorkerChange(Watcher.Event e) {
                 break;
         }
 
-    } catch (KeeperException | InterruptedException e) {
-        e.printStackTrace();
+    } catch (KeeperException | InterruptedException exception) {
+        exception.printStackTrace();
     }
 }
 
 
-private void handleTaskChange(Watcher.Event e) {
+private void handleTaskChange(WatchedEvent e) {
     try {
 
         List<String> tasksQueue = zk.getChildren("/dist30/tasks", false);
         String taskPath = e.getPath(); 
         byte[] taskData = zk.getData(taskPath, false, null);
-        String taskId = new String(taskData, StandardCharsets.UTF_8);
+        String taskId = new String(taskData);
 
 
         switch (e.getType()) {
@@ -227,13 +227,13 @@ private void handleTaskChange(Watcher.Event e) {
             // check if there's any idle watchers 
             // if not, add it to the queue 
             case NodeCreated: 
-                if (!idleWorkers.isEmpty) {
-                    assignTaskToWorker(taskId)
+                if (!tasksQueue.isEmpty()) {
+                    assignTaskToWorker(taskId); 
                 }
         }
 
-    } catch (KeeperException | InterruptedException e) {
-        e.printStackTrace();
+    } catch (KeeperException | InterruptedException exception) {
+        exception.printStackTrace();
     }
 }
 
@@ -340,8 +340,6 @@ public void processResult(int rc, String path, Object ctx, Stat stat) {
 		//What to do if you do not have a free worker process?
         if (path.equals("/dist30/workers")) {
             System.out.println("DISTAPP : Workers changed: " + children);
-            // assign task to worker 
-            checkAndAssignTask(children); 
         }
 	    else{
             System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
