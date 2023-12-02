@@ -18,6 +18,7 @@ import org.apache.zookeeper.ZooDefs.Ids;
 import org.apache.zookeeper.KeeperException.*;
 import org.apache.zookeeper.data.*;
 import org.apache.zookeeper.KeeperException.Code;
+import java.nio.charset.StandardCharsets;
 
 // TODO
 // Replace 30 with your group number.
@@ -33,7 +34,7 @@ import org.apache.zookeeper.KeeperException.Code;
 //		In particular, if the process is a worker, Watches & CallBacks should only be used to assign the "work" to a separate thread inside your program.
 
 
-public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, AsyncCallback.StatCallback
+public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, AsyncCallback.StatCallback, AsyncCallback.DataCallback
 {
 	ZooKeeper zk;
 	String zkServer, pinfo;
@@ -50,34 +51,30 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 		System.out.println("DISTAPP : Process information : " + pinfo);
 		
 	}
-private void cleanupPreviousNodes(ZooKeeper zk, String path) throws KeeperException, InterruptedException {
+private void clearIdleWorkers(String path) {
     try {
-        Stat stat = zk.exists(path, false);
-        if (stat != null) {
-            deleteRecursive(zk, path);
-        }
-    } catch (KeeperException.NoNodeException e) {
-        // Node does not exist, nothing to delete
-        System.out.println("Node does not exist: " + path);
-    }
-}
-
-private void deleteRecursive(ZooKeeper zk, String path) throws KeeperException, InterruptedException {
-    try {
+        // Get the list of children nodes at the given path
         List<String> children = zk.getChildren(path, false);
+
+        // Recursively delete children nodes and their descendants
         for (String child : children) {
-            deleteRecursive(zk, path + "/" + child);
+            String childPath = path + "/" + child;
+
+            // Recursive call to delete the child node and its descendants
+            clearIdleWorkers(zk,childPath);
+
+            // Delete the current child node
+            zk.delete(childPath, -1);
+            System.out.println("Deleted node: " + childPath);
         }
-        if (!path.equals("/dist30/idleWorkers")) {
-            zk.delete(path, -1);
-            System.out.println("Deleted node: " + path);
-        }
+
+        System.out.println("All children nodes under " + path + " deleted successfully.");
     } catch (KeeperException.NoNodeException e) {
-        // Node might have been deleted by another process, handle as needed
-        System.out.println("Node does not exist: " + path);
+        // The node doesn't exist, no further action needed
+    } catch (KeeperException | InterruptedException e) {
+        e.printStackTrace();
     }
 }
-
 
 
 
@@ -86,7 +83,7 @@ private void deleteRecursive(ZooKeeper zk, String path) throws KeeperException, 
 	{
 		zk = new ZooKeeper(zkServer, 10000, this); //connect to ZK.
 		System.out.println("Doing cleanup");
-		cleanupPreviousNodes(zk,"/dist30/idleWorkers");
+		clearIdleWorkers("/dist30/idleWorkers");
 		//zk.create("/dist30/idleWorkers", new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT); // I may change it to pinfo 
 
 		
@@ -143,12 +140,6 @@ private void addToIdleWorkersQueue(String worker) {
         zk.create(idleWorkerPath, new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT); 
 		System.out.println("Worker " + worker + " added to idle queue");
 		zk.create(idleWorkerPath + "/tasks", new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
-		
-
-		
-       
-        
-		
 
 	} catch (KeeperException | InterruptedException e) {
         e.printStackTrace();
@@ -159,8 +150,7 @@ private void handleTasksUnderIdleWorkers(String path) {
         // Fetch the list of tasks under idleWorkers
         zk.getChildren(path, this, this ,null);
 
-        // Process the tasks or trigger additional logic
-        System.out.println("Tasks changed under " + path + ": " );
+       
  
 
 }
@@ -204,10 +194,12 @@ public void process(WatchedEvent e)
 
             
 		}
-		if(e.getType() == Watcher.Event.EventType.NodeChildrenChanged &&  e.getPath().endsWith("/tasks") && e.getPath().startsWith("/dist30/idleWorkers/worker")){
-			System.out.println("BedoreEvent path" + e.getPath());
+		
+		if (e.getType() == 	Watcher.Event.EventType.NodeDataChanged && e.getPath().startsWith("/dist30/idleWorkers") && e.getPath().endsWith("/tasks")){
+						System.out.println("Watch for data changes under dist30/idleWorkers/tasks");
 
-          handleTasksUnderIdleWorkers(e.getPath());
+
+			zk.getData(e.getPath(), this ,this,null);
 
 		}
 		
@@ -234,6 +226,8 @@ public void processResult(int rc, String path, Object ctx, Stat stat) {
 
           pinfo = registerAsWorker();
 			handleTasksUnderIdleWorkers("/dist30/idleWorkers/worker-" + pinfo +"/tasks");
+			zk.getData("/dist30/idleWorkers/worker-" + pinfo +"/tasks", this ,this,null);
+
         }
 
         System.out.println("DISTAPP : Role : I will be functioning as " + (isManager ? "manager" : "worker"));
@@ -242,33 +236,43 @@ public void processResult(int rc, String path, Object ctx, Stat stat) {
     }
 }
 
-	private void assignTaskToIdleWorker(List<String> tasks) {
+private void assignTaskToIdleWorker(String c) {
     try {
-		System.out.println("Assign job to the idleworker");
+        System.out.println("Assign job to the idle worker");
+        System.out.println("c: " + c);
+
         // Get the list of idle workers
-        List<String> idleWorkers = zk.getChildren("/dist30/idleWorkers", false);
+        List<String> idleWorkers = zk.getChildren("/dist30/idleWorkers", true);
 
-        if (!idleWorkers.isEmpty()) {
-            // Choose an idle worker (for simplicity, choose the first one)
-            String chosenWorker = idleWorkers.get(0);
-
+        for (String chosenWorker : idleWorkers) {
             // Assign the task to the chosen idle worker
-            String taskNodePath = "/dist30/idleWorkers" + "/" + chosenWorker + "/tasks";
+            String taskNodePath = "/dist30/idleWorkers/" + chosenWorker + "/tasks";
 
-            // Check if the task node exists before setting data
-            Stat taskNodeStat = zk.exists(taskNodePath, false);
+            // Check if the task node exists before getting data
+            Stat taskNodeStat = zk.exists(taskNodePath, true);
             if (taskNodeStat != null) {
-                if (!tasks.isEmpty()) {
-                    zk.setData(taskNodePath, tasks.get(0).getBytes(), -1);
+                // Check if the worker already has a task
+                List<String> workerTasks = zk.getChildren(taskNodePath, true);
+
+                if (workerTasks.isEmpty()) {
+                    zk.setData(taskNodePath, c.getBytes(), -1);
                     System.out.println("Task assigned to idle worker: " + chosenWorker);
+
+                    // Optionally, you may want to remove the assigned task from /dist30/tasks
+                    // zk.delete("/dist30/tasks/" + c, -1);
+
+                    // Break out of the loop after assigning one task to one worker
+                    break;
                 } else {
                     System.out.println("No tasks available to assign to the worker.");
                 }
-            
+            } else {
+                System.out.println("Worker " + chosenWorker + " already has a task.");
             }
+        }
 
-            
-        } else {
+        // Handle the case when no idle workers are available
+        if (idleWorkers.isEmpty()) {
             System.out.println("No idle workers available to assign the task.");
         }
     } catch (KeeperException | InterruptedException e) {
@@ -277,46 +281,105 @@ public void processResult(int rc, String path, Object ctx, Stat stat) {
 }
 
 
-	//Asynchronous callback that is invoked by the zk.getChildren request.
-	public void processResult(int rc, String path, Object ctx, List<String> children)
-	{
-		
 
-		
-		 if (path.equals("/dist30/workers")) {
+	public void processResult(int rc, String path, Object ctx, List<String> children) {
+    try {
+        if (path.equals("/dist30/workers")) {
             System.out.println("DISTAPP : Workers list Idle: " + children);
-         
-        }
+        } 
+		
+		
 		else if (path.equals("/dist30/idleWorkers")) {
-            System.out.println("DISTAPP : Workers list Idle: " + children);
-         
+
+            
+			System.out.println("DISTAPP : Workers list Idle: " + children);
+            
+			List<String> waitingTasks = zk.getChildren("/dist30/tasks", false);
+            
+		if (!waitingTasks.isEmpty()) {
+    List<String> idleWorkers = zk.getChildren("/dist30/idleWorkers", true);
+
+    for (String worker : idleWorkers) {
+        String taskNodePath = "/dist30/idleWorkers/" + worker + "/tasks";
+
+        // Ensure waitingTasks is not empty before accessing the first element
+        if (!waitingTasks.isEmpty()) {
+            // Assign waiting tasks to the idle worker
+            zk.setData(taskNodePath, waitingTasks.get(0).getBytes(), -1);
+
+            System.out.println("Waiting task assigned to idle worker: " + worker);
+
+            // Remove the assigned task from /dist30/tasks
+           // zk.delete("/dist30/tasks/" + waitingTasks.get(0), -1);
+
+            // Break out of the loop to assign only one task to one worker
+            break;
+        } else {
+            System.out.println("No waiting tasks available.");
         }
-		else if(path.startsWith("/dist30/idleWorkers") && path.endsWith("/tasks")){
-			System.out.println("Tasks added to the idle  worker for processing in a single thread");
-			
-		//	 try {
-          //  zk.delete(path, -1);
-        //} catch (KeeperException | InterruptedException e) {
-          //  e.printStackTrace();
-       // }
-
-		}
-
-	    else{
-//here manager will get the task notification so it should add it to the task under " dist30/idleWorkers/workers/tasks( if there is a idle worker )"
-       
-            System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
-			System.out.println("tasks" + children);
-			assignTaskToIdleWorker(children);
-			
-		
     }
-		
-
-
-
-           
+} else {
+    System.out.println("No waiting tasks available.");
 }
+
+		
+	} else {
+            System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
+            System.out.println("tasks" + children);
+            for (String c : children) {
+                assignTaskToIdleWorker(c);
+            }
+        }
+    } catch (KeeperException | InterruptedException e) {
+        e.printStackTrace();
+    }
+	
+	}
+
+
+ public void processResult(int rc, String path, Object ctx, byte[] data, Stat stat) {
+        // Implementation of the processResult method for DataCallback
+        if (rc == KeeperException.Code.OK.intValue()) {
+            // Data retrieval successful, do something with the data
+            System.out.println("Data retrieved successfully: " + new String(data));
+			 System.out.println("Data " + new String(data));
+			
+
+			  
+try{
+
+	String data1 = new String(data, StandardCharsets.UTF_8);
+// Remove trailing '/' if present
+System.out.println("data1" + data1);
+if ( !data1.isEmpty()){
+byte[] taskSerial = zk.getData("/dist30/tasks/" + data1, false, null);
+
+
+                	ByteArrayInputStream bis = new ByteArrayInputStream(taskSerial);
+				ObjectInput in = new ObjectInputStream(bis);
+				DistTask dt = (DistTask) in.readObject();
+
+				//Execute the task.
+				//TODO: Again, time consuming stuff. Should be done by some other thread and not inside a callback!
+				dt.compute();
+				
+				// Serialize our Task object back to a byte array!
+				ByteArrayOutputStream bos = new ByteArrayOutputStream();
+				ObjectOutputStream oos = new ObjectOutputStream(bos);
+				oos.writeObject(dt); oos.flush();
+				taskSerial = bos.toByteArray();
+				zk.create("/dist30/tasks/"+data1+"/result", taskSerial, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+		
+}
+                } catch (KeeperException | InterruptedException | IOException | ClassNotFoundException e) {
+                    System.out.println(e);
+                }
+        } else {
+            // Handle error
+            System.err.println("Error retrieving data: " + KeeperException.Code.get(rc));
+        }
+    }
+	
 		
 
 
@@ -336,7 +399,7 @@ public void processResult(int rc, String path, Object ctx, Stat stat) {
 		
 	}
 
-	}
+}
 
 
 
