@@ -31,12 +31,16 @@ import org.apache.zookeeper.KeeperException.Code;
 //		you manage the code more modularly.
 //	REMEMBER !! Managers and Workers are also clients of ZK and the ZK client library is single thread - Watches & CallBacks should not be used for time consuming tasks.
 //		In particular, if the process is a worker, Watches & CallBacks should only be used to assign the "work" to a separate thread inside your program.
-public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
+
+
+public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, AsyncCallback.StatCallback
 {
 	ZooKeeper zk;
 	String zkServer, pinfo;
 	boolean isManager=false;
 	boolean initalized=false;
+	private boolean watcherSet = false;
+
 
 	DistProcess(String zkhost)
 	{
@@ -46,55 +50,68 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
 		System.out.println("DISTAPP : Process information : " + pinfo);
 		
 	}
+private void cleanupPreviousNodes(ZooKeeper zk, String path) throws KeeperException, InterruptedException {
+    try {
+        Stat stat = zk.exists(path, false);
+        if (stat != null) {
+            deleteRecursive(zk, path);
+        }
+    } catch (KeeperException.NoNodeException e) {
+        // Node does not exist, nothing to delete
+        System.out.println("Node does not exist: " + path);
+    }
+}
+
+private void deleteRecursive(ZooKeeper zk, String path) throws KeeperException, InterruptedException {
+    try {
+        List<String> children = zk.getChildren(path, false);
+        for (String child : children) {
+            deleteRecursive(zk, path + "/" + child);
+        }
+        if (!path.equals("/dist30/idleWorkers")) {
+            zk.delete(path, -1);
+            System.out.println("Deleted node: " + path);
+        }
+    } catch (KeeperException.NoNodeException e) {
+        // Node might have been deleted by another process, handle as needed
+        System.out.println("Node does not exist: " + path);
+    }
+}
+
+
+
+
 
 	void startProcess() throws IOException, UnknownHostException, KeeperException, InterruptedException
 	{
 		zk = new ZooKeeper(zkServer, 10000, this); //connect to ZK.
+		System.out.println("Doing cleanup");
+		cleanupPreviousNodes(zk,"/dist30/idleWorkers");
+		//zk.create("/dist30/idleWorkers", new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT); // I may change it to pinfo 
+
+		
+
 	}
+	
+
 
 	void initalize() {
-    try {
-		Stat managerStat = zk.exists("/dist30/manager", this);
+	
+    
+		zk.exists("/dist30/manager", this, this ,null);
 		
-		if (managerStat == null) {
-            // The manager znode does not exist, so this instance becomes the manager.
-            runForManager();
-            isManager = true;
-			System.out.println("watchtasks");
-            getTasks();
-			System.out.println("watchworkers");
-            watchWorkers();
-		}
-		else{
-			registerAsWorker();
-			}
-		
-// Install monitoring on any new tasks that will be created.
-        // TODO monitor for worker tasks?
-		
-    } catch (NodeExistsException nee) {
-        isManager = false;
-    } catch (UnknownHostException uhe) {
-        System.out.println(uhe);
-    } catch (KeeperException ke) {
-        System.out.println(ke);
-    } catch (InterruptedException ie) {
-        System.out.println(ie);
-    }
-
-    System.out.println("DISTAPP : Role : " + " I will be functioning as " + (isManager ? "manager" : "worker"));
-}
-void watchWorkers() {
-            // Watch for changes in the list of workers
-            zk.getChildren("/dist30/workers", this, this, null);
-      
     }
 
 
+    void watchWorkers() {
+        // Watch for changes in the list of workers
+        zk.getChildren("/dist30/workers",this,this,null);
 
+    }
 
-
-
+	void watchIdleWorkers(){
+		zk.getChildren("/dist30/idleWorkers",this, this,null);
+	}
 
 	// Manager fetching task znodes...
 	void getTasks()
@@ -109,29 +126,48 @@ void watchWorkers() {
 		// This is an example of Synchronous API invocation as the function waits for the execution and no callback is involved..
 		zk.create("/dist30/manager", pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
 	}
-	void registerAsWorker() throws UnknownHostException, KeeperException, InterruptedException {
-    
-			String workerPath = "/dist30/workers/worker-" + pinfo; // Unique identifier for the worker
-			zk.create(workerPath, pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
-			// Mark the worker as idle initially
-			zk.create(workerPath + "/status", "IDLE".getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+	private String registerAsWorker() throws KeeperException, InterruptedException {
+    // Create a worker znode
+		String workerPath = "/dist30/workers/worker-" + pinfo; // Unique identifier for the worker
+		zk.create(workerPath, "IDLE".getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL); // I may change it to pinfo 
+		addToIdleWorkersQueue(pinfo);
+		return pinfo;
+	
+		
+		}  
 
-}    
+private void addToIdleWorkersQueue(String worker) {
+    String idleWorkerPath = "/dist30/idleWorkers/worker-" + worker;
+    try {
+        // make an ephemeral node for the idle worker
+        zk.create(idleWorkerPath, new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT); 
+		System.out.println("Worker " + worker + " added to idle queue");
+		zk.create(idleWorkerPath + "/tasks", new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
+		
 
+		
+       
+        
+		
 
+	} catch (KeeperException | InterruptedException e) {
+        e.printStackTrace();
+    }
+}
+private void handleTasksUnderIdleWorkers(String path) {
+ 
+        // Fetch the list of tasks under idleWorkers
+        zk.getChildren(path, this, this ,null);
 
-public void process(WatchedEvent e)
+        // Process the tasks or trigger additional logic
+        System.out.println("Tasks changed under " + path + ": " );
+ 
+
+}
+
+public void process(WatchedEvent e) 
 	{
-		//Get watcher notifications.
-
-		//!! IMPORTANT !!
-		// Do not perform any time consuming/waiting steps here
-		//	including in other functions called from here.
-		// 	Your will be essentially holding up ZK client library 
-		//	thread and you will not get other notifications.
-		//	Instead include another thread in your program logic that
-		//   does the time consuming "work" and notify that thread from here.
-
+		
 		System.out.println("DISTAPP : Event received : " + e);
 		System.out.println("Event path" + e.getPath());
 
@@ -142,6 +178,7 @@ public void process(WatchedEvent e)
 			{
 				initalize();
 				initalized = true;
+
 			}
 		}
 
@@ -151,86 +188,155 @@ public void process(WatchedEvent e)
 			// There has been changes to the children of the node.
 			// We are going to re-install the Watch as well as request for the list of the children.
 			getTasks();
+			System.out.println("Manager has a new task");
+
+            
 		}
 		if(e.getType() == Watcher.Event.EventType.NodeChildrenChanged && e.getPath().equals("/dist30/workers"))
 		{
-			// There has been changes to the children of the node.
-			// We are going to re-install the Watch as well as request for the list of the children.
 			watchWorkers();
+
+            
 		}
+		if(e.getType() == Watcher.Event.EventType.NodeChildrenChanged && e.getPath().equals("/dist30/idleWorkers") )
+		{
+			watchIdleWorkers();
+
+            
+		}
+		if(e.getType() == Watcher.Event.EventType.NodeChildrenChanged &&  e.getPath().endsWith("/tasks") && e.getPath().startsWith("/dist30/idleWorkers/worker")){
+			System.out.println("BedoreEvent path" + e.getPath());
+
+          handleTasksUnderIdleWorkers(e.getPath());
+
+		}
+		
+	
+		
+
+
 	}
+
+
+
+public void processResult(int rc, String path, Object ctx, Stat stat) {
+    try {
+        if (rc == KeeperException.Code.NONODE.intValue()) {
+            // The manager znode does not exist, so this instance becomes the manager.
+            runForManager();
+            isManager = true;
+            System.out.println("watchtasks");
+            getTasks();
+            System.out.println("watchworkers");
+            watchWorkers();
+			watchIdleWorkers();
+        } else if (rc == KeeperException.Code.OK.intValue()) {
+
+          pinfo = registerAsWorker();
+			handleTasksUnderIdleWorkers("/dist30/idleWorkers/worker-" + pinfo +"/tasks");
+        }
+
+        System.out.println("DISTAPP : Role : I will be functioning as " + (isManager ? "manager" : "worker"));
+    } catch (Exception e) {
+        System.out.println(e);
+    }
+}
+
+	private void assignTaskToIdleWorker(List<String> tasks) {
+    try {
+		System.out.println("Assign job to the idleworker");
+        // Get the list of idle workers
+        List<String> idleWorkers = zk.getChildren("/dist30/idleWorkers", false);
+
+        if (!idleWorkers.isEmpty()) {
+            // Choose an idle worker (for simplicity, choose the first one)
+            String chosenWorker = idleWorkers.get(0);
+
+            // Assign the task to the chosen idle worker
+            String taskNodePath = "/dist30/idleWorkers" + "/" + chosenWorker + "/tasks";
+
+            // Check if the task node exists before setting data
+            Stat taskNodeStat = zk.exists(taskNodePath, false);
+            if (taskNodeStat != null) {
+                if (!tasks.isEmpty()) {
+                    zk.setData(taskNodePath, tasks.get(0).getBytes(), -1);
+                    System.out.println("Task assigned to idle worker: " + chosenWorker);
+                } else {
+                    System.out.println("No tasks available to assign to the worker.");
+                }
+            
+            }
+
+            
+        } else {
+            System.out.println("No idle workers available to assign the task.");
+        }
+    } catch (KeeperException | InterruptedException e) {
+        e.printStackTrace();
+    }
+}
+
 
 	//Asynchronous callback that is invoked by the zk.getChildren request.
 	public void processResult(int rc, String path, Object ctx, List<String> children)
 	{
+		
 
-		//!! IMPORTANT !!
-		// Do not perform any time consuming/waiting steps here
-		//	including in other functions called from here.
-		// 	Your will be essentially holding up ZK client library 
-		//	thread and you will not get other notifications.
-		//	Instead include another thread in your program logic that
-		//   does the time consuming "work" and notify that thread from here.
+		
+		 if (path.equals("/dist30/workers")) {
+            System.out.println("DISTAPP : Workers list Idle: " + children);
+         
+        }
+		else if (path.equals("/dist30/idleWorkers")) {
+            System.out.println("DISTAPP : Workers list Idle: " + children);
+         
+        }
+		else if(path.startsWith("/dist30/idleWorkers") && path.endsWith("/tasks")){
+			System.out.println("Tasks added to the idle  worker for processing in a single thread");
+			
+		//	 try {
+          //  zk.delete(path, -1);
+        //} catch (KeeperException | InterruptedException e) {
+          //  e.printStackTrace();
+       // }
 
-		// This logic is for manager !!
-		//Every time a new task znode is created by the client, this will be invoked.
+		}
 
-		// TODO: Filter out and go over only the newly created task znodes.
-		//		Also have a mechanism to assign these tasks to a "Worker" process.
-		//		The worker must invoke the "compute" function of the Task send by the client.
-		//What to do if you do not have a free worker process?
-        if (path.equals("/dist30/workers")) {
-        System.out.println("DISTAPP : Workers changed: " + children);
+	    else{
+//here manager will get the task notification so it should add it to the task under " dist30/idleWorkers/workers/tasks( if there is a idle worker )"
+       
+            System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
+			System.out.println("tasks" + children);
+			assignTaskToIdleWorker(children);
+			
 		
     }
-	else{
-		System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
-		for(String c: children)
-		{
-			System.out.println(c);
-			try
-			{
-				//TODO There is quite a bit of worker specific activities here,
-				// that should be moved done by a process function as the worker.
+		
 
-				//TODO!! This is not a good approach, you should get the data using an async version of the API.
-				byte[] taskSerial = zk.getData("/dist30/tasks/"+c, false, null);
 
-				// Re-construct our task object.
-				ByteArrayInputStream bis = new ByteArrayInputStream(taskSerial);
-				ObjectInput in = new ObjectInputStream(bis);
-				DistTask dt = (DistTask) in.readObject();
 
-				//Execute the task.
-				//TODO: Again, time consuming stuff. Should be done by some other thread and not inside a callback!
-				dt.compute();
-				
-				// Serialize our Task object back to a byte array!
-				ByteArrayOutputStream bos = new ByteArrayOutputStream();
-				ObjectOutputStream oos = new ObjectOutputStream(bos);
-				oos.writeObject(dt); oos.flush();
-				taskSerial = bos.toByteArray();
+           
+}
+		
 
-				// Store it inside the result node.
-				zk.create("/dist30/tasks/"+c+"/result", taskSerial, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-				//zk.create("/distXX/tasks/"+c+"/result", ("Hello from "+pinfo).getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-			}
-			catch(NodeExistsException nee){System.out.println(nee);}
-			catch(KeeperException ke){System.out.println(ke);}
-			catch(InterruptedException ie){System.out.println(ie);}
-			catch(IOException io){System.out.println(io);}
-			catch(ClassNotFoundException cne){System.out.println(cne);}
-		}
-	}
-	}
+
+	
+
+
 	public static void main(String args[]) throws Exception
 	{
 		//Create a new process
 		//Read the ZooKeeper ensemble information from the environment variable.
 		DistProcess dt = new DistProcess(System.getenv("ZKSERVER"));
+	
 		dt.startProcess();
 
 		//Replace this with an approach that will make sure that the process is up and running forever.
 		Thread.sleep(20000); 
+		
 	}
-}
+
+	}
+
+
+
