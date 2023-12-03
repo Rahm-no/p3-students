@@ -115,6 +115,13 @@ public class DistProcess implements Watcher
             }
         }
     }; 
+    AsyncCallback.StatCallback setDataCallback = new AsyncCallback.StatCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, Stat stat) {
+            System.out.println("DISTAPP : processResult for setData()");
+        }
+
+    };
     
     // ------------------------ initializing ------------------------
 
@@ -127,20 +134,6 @@ public class DistProcess implements Watcher
 	{
         System.out.println("DISTAPP : initialize()");
         zk.exists("/dist30/manager", this, existsCallback, "isManager");
-		// try
-        //     {
-        //         runForManager();	// See if you can become the manager (i.e, no other manager exists)
-        //         isManager=true;
-        //         getTasks(); // Install monitoring on any new tasks that will be created.
-        //         // TODO monitor for worker tasks?
-        //         getWorkers();
-        //         createInitialAssignments(); 
-        //     } catch(NodeExistsException nee) { 
-        //         // TODO: What else will you need if this was a worker process?
-        //         isManager=false; 
-        //         createWorker(); 
-        //     }
-		// System.out.println("DISTAPP : Role : " + " I will be functioning as " +(isManager?"manager":"worker"));
 	}
 
     // ------------------------ helper funcs ------------------------
@@ -177,8 +170,10 @@ public class DistProcess implements Watcher
 		//Try to create an ephemeral node to be a worker, put the hostname and pid of this process as the data.
 		// This is an example of Synchronous API invocation as the function waits for the execution and no callback is involved..
         System.out.println("DISTAPP : becomeWorker()");
-		zk.create("/dist30/worker/worker-" + new String(pinfo.getBytes()), pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL, createCallback, "createWorker");
-	}
+        String workerPath = "/dist30/workers/worker-" + new String(pinfo.getBytes()); 
+		zk.create(workerPath, pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL, createCallback, "createWorker");
+        zk.setData(workerPath, "IDLE".getBytes(), -1, setDataCallback, "setWorkerData");
+    }
 
     void createInitialAssignments() throws UnknownHostException, KeeperException, InterruptedException {
         System.out.println("DISTAPP : createInitialAssignments()");
@@ -228,7 +223,7 @@ public class DistProcess implements Watcher
 			// We are going to re-install the Watch as well as request for the list of the children.
             System.out.println("DISTAPP : Event received : if statement 2 :" + e);
 			getTasks();
-		} if (e.getType() == Watcher.Event.EventType.NodeChildrenChanged && e.getPath().equals("/dist30/watchers")) {
+		} if (e.getType() == Watcher.Event.EventType.NodeChildrenChanged && e.getPath().equals("/dist30/workers")) {
             System.out.println("DISTAPP : Event received : if statement 3 :" + e);
             getWorkers();
             try {
