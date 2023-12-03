@@ -92,6 +92,29 @@ public class DistProcess implements Watcher
             // System.out.println("Znode version: " + stat.getVersion());
         }
     };
+    AsyncCallback.StatCallback existsCallback = new AsyncCallback.StatCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, Stat stat) {
+            System.out.println("DISTAPP : processResult for exist()");
+            try
+            {
+                if (rc == KeeperException.Code.NONODE.intValue()) {
+                    runForManager();	// See if you can become the manager (i.e, no other manager exists)
+                    isManager=true;
+                    getTasks(); // Install monitoring on any new tasks that will be created.
+                    // TODO monitor for worker tasks?
+                    getWorkers();
+                    createInitialAssignments(); 
+                } else if (rc == KeeperException.Code.OK.intValue()) {
+                    // TODO: What else will you need if this was a worker process?
+                    isManager=false; 
+                    createWorker(); 
+                }
+            } catch (Exception e) {
+                System.out.println(e);
+            }
+        }
+    }; 
     
     // ------------------------ initializing ------------------------
 
@@ -103,20 +126,21 @@ public class DistProcess implements Watcher
 	void initalize() throws UnknownHostException, KeeperException, InterruptedException
 	{
         System.out.println("DISTAPP : initialize()");
-		try
-            {
-                runForManager();	// See if you can become the manager (i.e, no other manager exists)
-                isManager=true;
-                getTasks(); // Install monitoring on any new tasks that will be created.
-                // TODO monitor for worker tasks?
-                getWorkers();
-                createInitialAssignments(); 
-            } catch(NodeExistsException nee) { 
-                // TODO: What else will you need if this was a worker process?
-                isManager=false; 
-                createWorker(); 
-            }
-		System.out.println("DISTAPP : Role : " + " I will be functioning as " +(isManager?"manager":"worker"));
+        zk.exists("/dist30/manager", this, existsCallback, "isManager");
+		// try
+        //     {
+        //         runForManager();	// See if you can become the manager (i.e, no other manager exists)
+        //         isManager=true;
+        //         getTasks(); // Install monitoring on any new tasks that will be created.
+        //         // TODO monitor for worker tasks?
+        //         getWorkers();
+        //         createInitialAssignments(); 
+        //     } catch(NodeExistsException nee) { 
+        //         // TODO: What else will you need if this was a worker process?
+        //         isManager=false; 
+        //         createWorker(); 
+        //     }
+		// System.out.println("DISTAPP : Role : " + " I will be functioning as " +(isManager?"manager":"worker"));
 	}
 
     // ------------------------ helper funcs ------------------------
