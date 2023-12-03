@@ -19,6 +19,9 @@ import org.apache.zookeeper.KeeperException.*;
 import org.apache.zookeeper.data.*;
 import org.apache.zookeeper.KeeperException.Code;
 
+// random imports
+import java.nio.charset.StandardCharsets;
+
 // TODO
 // Replace XX with your group number.
 // You may have to add other interfaces such as for threading, etc., as needed.
@@ -31,13 +34,13 @@ import org.apache.zookeeper.KeeperException.Code;
 //		you manage the code more modularly.
 //	REMEMBER !! Managers and Workers are also clients of ZK and the ZK client library is single thread - Watches & CallBacks should not be used for time consuming tasks.
 //		In particular, if the process is a worker, Watches & CallBacks should only be used to assign the "work" to a separate thread inside your program.
-public class DistProcess implements Watcher
-																		, AsyncCallback.ChildrenCallback
+public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
 {
 	ZooKeeper zk;
 	String zkServer, pinfo;
 	boolean isManager=false;
 	boolean initalized=false;
+    int highestSequenceNumber = -1;
 
 	DistProcess(String zkhost)
 	{
@@ -80,11 +83,83 @@ public class DistProcess implements Watcher
             // ctx is the context object passed when the method was called
             // children is the list of children of the znode
             // stat is the Stat object containing metadata about the znode
+            System.out.println("context"); 
     
             if (path.equals("/dist30/tasks")) {
                 System.out.println("getChildren processResult: tasks"); 
+
+                // check if new node got added 
+                int currentHighestSequenceNumber = children.stream()
+                    .mapToInt(child -> {
+                        // Assuming the child nodes follow the pattern 'node-name0000000001'
+                        String sequencePart = child.substring(child.lastIndexOf('-') + 1);
+                        return Integer.parseInt(sequencePart);
+                    })
+                    .max()
+                    .orElse(-1);
+
+                if (currentHighestSequenceNumber > highestSequenceNumber) {
+                    System.out.println("New child(ren) added.");
+                    highestSequenceNumber = currentHighestSequenceNumber;
+                    String formattedSequenceNumber = String.format("%010d", highestSequenceNumber);
+                    String taskId = "/dist30/tasks/task-" + formattedSequenceNumber; 
+                    
+                    try {
+                        List<String> assignmentsChildren = zk.getChildren("/dist30/assignments", true); 
+
+                        System.out.println("If idle worker is available in /dist30/assignments, then assign task");
+                        if (!assignmentsChildren.isEmpty()) {
+
+                            String firstChildPath = "/dist30/assignments/" + assignmentsChildren.get(0);
+                            zk.setData(firstChildPath, taskId.getBytes(), -1, setDataCallback, "setTaskToWorker"); 
+                        }
+                    } catch (Exception ex) {
+                        System.out.println("Exception occured");
+                    }
+                } else {
+                    System.out.println("Child(ren) deleted.");
+                }
+                
             } else if (path.equals("/dist30/workers")) {
                 System.out.println("getChildren processResult: workers"); 
+                
+
+            } else if (path.equals("/dist30/assignments")) {
+                System.out.println("getChildren processResult: assignments"); 
+                
+                // TODO: Handle situation where there's excess of tasks but not enough 
+                // idle workers
+
+            //     // check if there are tasks that haven't been processed 
+            //     try {
+            //         List<String> unassignedWorkers = zk.getChildren("/dist30/assignments", false);
+            //         if (unassignedWorkers.isEmpty()) {
+            //             return; 
+            //         }
+            //         List<String> tasks = zk.getChildren("/dist30/tasks", false);
+            //         System.out.println(tasks.size());  
+                    
+            //         System.out.println("Iterate through list of tasks and check for unfulfilled tasks"); 
+            //         for (String task : tasks) {
+
+                        
+            //             String taskId = "/dist30/tasks/" + task; 
+            //             String resultPath = "/dist30/tasks/" + task + "/result"; 
+            //             System.out.println("Check if child node exists");
+            //             Stat resultNode = zk.exists(resultPath, false); 
+                        
+            //             if (resultNode == null) {
+                            
+            //                 System.out.println("Found unassigned task");
+            //                 unassignedWorkers = zk.getChildren("/dist30/assignments", false);
+            //                 String unassignedWorkerPath = "/dist30/assignments/" + unassignedWorkers.get(0); 
+            //                 zk.setData(unassignedWorkerPath, taskId.getBytes(), -1, setDataCallback, "setTaskToWorker"); 
+                            
+            //             }
+            //         }
+            //     } catch (Exception ex) {
+            //         System.out.println("Exception occured");
+            //     }
             }
     
             // Optionally, you can use the Stat object to get additional information about the znode
@@ -102,14 +177,13 @@ public class DistProcess implements Watcher
                     runForManager();	// See if you can become the manager (i.e, no other manager exists)
                     isManager=true;
                     getTasks(); // Install monitoring on any new tasks that will be created.
-                    // TODO monitor for worker tasks?
                     getWorkers();
                     createInitialAssignments(); 
                 } else if (rc == KeeperException.Code.OK.intValue()) {
-                    // TODO: What else will you need if this was a worker process?
                     isManager=false; 
                     createWorker(); 
                 }
+                System.out.println("DISTAPP : Role : I will be functioning as " + (isManager ? "manager" : "worker"));
             } catch (Exception e) {
                 System.out.println(e);
             }
@@ -119,6 +193,56 @@ public class DistProcess implements Watcher
         @Override
         public void processResult(int rc, String path, Object ctx, Stat stat) {
             System.out.println("DISTAPP : processResult for setData()");
+        }
+
+    };
+
+    AsyncCallback.DataCallback getDataStatCallback = new AsyncCallback.DataCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, byte[] data, Stat stat) {
+
+            if (ctx.equals("getDataAssignmentWorker")) {
+                return; 
+            }
+
+            System.out.println("DISTAPP : processResult for getData()");
+            String taskPath = new String(data, StandardCharsets.UTF_8);
+            System.out.println(taskPath);
+            try {
+                System.out.println("Remove assignment worker node");
+                String assignmentsWorkerNode = "/dist30/assignments/worker-" + new String(pinfo.getBytes()); 
+                zk.delete(assignmentsWorkerNode, -1);
+                byte[] task = zk.getData(taskPath, null, stat); 
+                System.out.println("Got the task");
+
+                // Re-construct our task object.
+                System.out.println("Deserialize");
+				ByteArrayInputStream bis = new ByteArrayInputStream(task);
+				ObjectInput in = new ObjectInputStream(bis);
+				DistTask dt = (DistTask) in.readObject();
+
+
+				//Execute the task.
+				//TODO: Again, time consuming stuff. Should be done by some other thread and not inside a callback!
+                System.out.println("Starting computing");
+				dt.compute();
+                System.out.println("Finished computing");
+				
+				// Serialize our Task object back to a byte array!
+                System.out.println("Reserialize");
+				ByteArrayOutputStream bos = new ByteArrayOutputStream();
+				ObjectOutputStream oos = new ObjectOutputStream(bos);
+				oos.writeObject(dt); oos.flush();
+				task = bos.toByteArray();
+
+				// Store it inside the result node.
+                System.out.println("Create result node");
+				zk.create(taskPath + "/result", task, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                createAssignments();
+
+            } catch (Exception ex) {
+                System.out.println("Error occured");
+            }
         }
 
     };
@@ -172,20 +296,25 @@ public class DistProcess implements Watcher
         System.out.println("DISTAPP : becomeWorker()");
         String workerPath = "/dist30/workers/worker-" + new String(pinfo.getBytes()); 
 		zk.create(workerPath, pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL, createCallback, "createWorker");
-        zk.setData(workerPath, "IDLE".getBytes(), -1, setDataCallback, "setWorkerData");
+        // zk.setData(workerPath, "IDLE".getBytes(), -1, setDataCallback, "setWorkerData");
+        createAssignments(); 
     }
 
     void createInitialAssignments() throws UnknownHostException, KeeperException, InterruptedException {
         System.out.println("DISTAPP : createInitialAssignments()");
-		zk.create("/dist30/assignments" + new String(pinfo.getBytes()), pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL, createCallback, "createInitialAssignments");
+        String assignmentsPath = "/dist30/assignments"; 
+		zk.create(assignmentsPath, pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT, createCallback, "createInitialAssignments");
+        zk.getChildren(assignmentsPath, this, getChildren2Callback, "getAssignmentsChildren()");
     }
 
     void createAssignments() throws UnknownHostException, KeeperException, InterruptedException {
         System.out.println("DISTAPP : createAssignments()");
-        zk.create("/dist30/assignments/worker-" + new String(pinfo.getBytes()), pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL, createCallback, "createAssignment"); 
+        String workerAssignmentPath = "/dist30/assignments/worker-" + new String(pinfo.getBytes()); 
+        zk.create(workerAssignmentPath, "EMPTY".getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL, createCallback, "createAssignment"); 
+        zk.getData(workerAssignmentPath, true, getDataStatCallback, "getDataAssignmentWorker"); 
     }
 
-
+    // ------------------------ other funcs ------------------------
 	public void process(WatchedEvent e) 
 	{
 		//Get watcher notifications.
@@ -223,15 +352,15 @@ public class DistProcess implements Watcher
 			// We are going to re-install the Watch as well as request for the list of the children.
             System.out.println("DISTAPP : Event received : if statement 2 :" + e);
 			getTasks();
-		} if (e.getType() == Watcher.Event.EventType.NodeChildrenChanged && e.getPath().equals("/dist30/workers")) {
+
+		} else if (e.getType() == Watcher.Event.EventType.NodeChildrenChanged && e.getPath().equals("/dist30/workers")) {
             System.out.println("DISTAPP : Event received : if statement 3 :" + e);
             getWorkers();
-            try {
-                createAssignments(); 
-            } catch (UnknownHostException exception) {
-            } catch (KeeperException exception) {
-            } catch (InterruptedException exception) {
-            }
+
+        } else if (e.getType() == Watcher.Event.EventType.NodeDataChanged && e.getPath().equals("/dist30/assignments/worker-" + new String(pinfo.getBytes()))) {
+            System.out.println("DISTAPP : Event received : if statement 4 :" + e);
+            String assignmentsTaskPath = "/dist30/assignments/worker-" + new String(pinfo.getBytes()); 
+            zk.getData(assignmentsTaskPath, this, getDataStatCallback, "getTaskFromAssignment");
         }
 	}
 
