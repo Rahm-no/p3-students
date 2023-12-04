@@ -10,6 +10,10 @@ import java.util.*;
 // To get the name of the host.
 import java.net.*;
 
+// threading 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 //To get the process id.
 import java.lang.management.*;
 
@@ -41,6 +45,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
 	boolean isManager=false;
 	boolean initalized=false;
     int highestSequenceNumber = -1;
+    private ExecutorService executor = Executors.newCachedThreadPool();
 
 	DistProcess(String zkhost)
 	{
@@ -208,6 +213,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
             System.out.println("DISTAPP : processResult for getData()");
             String taskPath = new String(data, StandardCharsets.UTF_8);
             System.out.println(taskPath);
+            executor.submit(() -> {
             try {
                 System.out.println("Remove assignment worker node");
                 String assignmentsWorkerNode = "/dist30/assignments/worker-" + new String(pinfo.getBytes()); 
@@ -243,6 +249,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
             } catch (Exception ex) {
                 System.out.println("Error occured");
             }
+        });
         }
 
     };
