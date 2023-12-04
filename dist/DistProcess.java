@@ -14,11 +14,16 @@ import java.net.*;
 //To get the process id.
 import java.lang.management.*;
 
+// Be sure to include zookeeper-jute JAR
+// for IDE linting to work properly
+// See https://www.mail-archive.com/user@zookeeper.apache.org/msg09953.html
+// "For 3.5, it was moved out of it, to zookeeper-jute-3.5.5.jar (with all
+// the other Jute-generated classes)"
+
 import org.apache.zookeeper.*;
 import org.apache.zookeeper.ZooDefs.Ids;
 import org.apache.zookeeper.KeeperException.*;
 import org.apache.zookeeper.data.*;
-import org.apache.zookeeper.KeeperException.Code;
 
 // TODO
 // Replace XX with your group number.
@@ -32,7 +37,7 @@ import org.apache.zookeeper.KeeperException.Code;
 //		you manage the code more modularly.
 //	REMEMBER !! Managers and Workers are also clients of ZK and the ZK client library is single thread - Watches & CallBacks should not be used for time consuming tasks.
 //		In particular, if the process is a worker, Watches & CallBacks should only be used to assign the "work" to a separate thread inside your program.
-public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback {
+public class DistProcess implements Watcher {
 	ZooKeeper zk;
 	String zkServer, pinfo;
 	boolean isManager = false;
@@ -50,29 +55,15 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback {
 	}
 
 	void initalize() {
-		try {
-			runForManager(); // See if you can become the manager (i.e, no other manager exists)
-			isManager = true;
-			getTasks(); // Install monitoring on any new tasks that will be created.
-						// TODO monitor for worker tasks?
-		} catch (NodeExistsException nee) {
-			isManager = false;
-		} // TODO: What else will you need if this was a worker process?
-		catch (UnknownHostException uhe) {
-			System.out.println(uhe);
-		} catch (KeeperException ke) {
-			System.out.println(ke);
-		} catch (InterruptedException ie) {
-			System.out.println(ie);
-		}
-
+		// No Manager in this MVP.
+		isManager = false;
 		System.out.println("DISTAPP : Role : " + " I will be functioning as " + (isManager ? "manager" : "worker"));
 
-	}
-
-	// Manager fetching task znodes...
-	void getTasks() {
-		zk.getChildren("/distXX/tasks", this, this, null);
+		try {
+			startWorking();
+		} catch (InterruptedException e) {
+			e.printStackTrace();
+		}
 	}
 
 	// Try to become the manager.
@@ -84,97 +75,160 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback {
 		zk.create("/distXX/manager", pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
 	}
 
-	public void process(WatchedEvent e) {
-		// Get watcher notifications.
+	private String findAndClaimJob() {
+		/*
+		 * Try bidding for each jobs. This method does not create any callback or watch.
+		 * 
+		 * Design note: ZooKeeper prevents /distXX/task_id/lock
+		 * from being created if /distXX/task_id has been deleted.
+		 * 
+		 * Params:
+		 * - List<String> jobNodes: list of job nodes.
+		 * 
+		 * Returns:
+		 * - job string if job bid went through.
+		 * - otherwise, return null.
+		 */
+		List<String> jobNames;
 
-		// !! IMPORTANT !!
-		// Do not perform any time consuming/waiting steps here
-		// including in other functions called from here.
-		// Your will be essentially holding up ZK client library
-		// thread and you will not get other notifications.
-		// Instead include another thread in your program logic that
-		// does the time consuming "work" and notify that thread from here.
+		try {
+			jobNames = zk.getChildren("/distXX/tasks", false);
+		} catch (Exception e) {
+			return null;
+		}
 
-		System.out.println("DISTAPP : Event received : " + e);
+		for (String jobName : jobNames) {
+			String jobPath = String.format("/distXX/tasks/%s", jobName);
+			String lockPath = String.format("/distXX/tasks/%s/lock", jobName);
 
-		if (e.getType() == Watcher.Event.EventType.None) // This seems to be the event type associated with connections.
-		{
-			// Once we are connected, do our intialization stuff.
-			if (e.getPath() == null && e.getState() == Watcher.Event.KeeperState.SyncConnected && initalized == false) {
-				initalize();
-				initalized = true;
+			try {
+				zk.create(lockPath, null, null, CreateMode.EPHEMERAL);
+				return jobPath;
+			} catch (KeeperException e) {
+				// Job has already been claimed.
+			} catch (InterruptedException e) {
+				return null;
 			}
 		}
 
-		// Manager should be notified if any new znodes are added to tasks.
-		if (e.getType() == Watcher.Event.EventType.NodeChildrenChanged && e.getPath().equals("/distXX/tasks")) {
-			// There has been changes to the children of the node.
-			// We are going to re-install the Watch as well as request for the list of the
-			// children.
-			getTasks();
+		return null;
+	}
+
+	private byte[] processTask(String jobPath) {
+		/*
+		 * Given the path to a job node, returns the serialized result for the job.
+		 * 
+		 * Params:
+		 * - String jobPath: full, absolute path to the job node.
+		 * 
+		 * Returns:
+		 * - byte[], serialized job result ready to be added to /results.
+		 */
+		byte[] data;
+		DistTask task;
+
+		try {
+			data = zk.getData(jobPath, false, null);
+		} catch (KeeperException e) {
+			return null;
+		} catch (InterruptedException e) {
+			return null;
+		}
+
+		try {
+			ByteArrayInputStream bis = new ByteArrayInputStream(data);
+			ObjectInput ois = new ObjectInputStream(bis);
+			task = (DistTask) ois.readObject();
+		} catch (Exception e) {
+			e.printStackTrace();
+			return null;
+		}
+
+		task.compute();
+
+		ByteArrayOutputStream bos = new ByteArrayOutputStream();
+		try {
+			ObjectOutputStream oos = new ObjectOutputStream(bos);
+			oos.writeObject(task);
+			oos.flush();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+
+		byte[] dataUpdated = bos.toByteArray();
+		return dataUpdated;
+	}
+
+	private void processAndSubmitTask(String jobPath) {
+		/*
+		 * Process a given task, submit result to ZooKeeper, and atomically create a new
+		 * watch.
+		 * 
+		 * Params:
+		 * - String jobPath: path to job.
+		 * 
+		 */
+		byte[] taskDataUpdated = processTask(jobPath);
+		String resultPath = String.format("%s/result", jobPath);
+
+		try {
+			zk.create(resultPath, taskDataUpdated, Ids.OPEN_ACL_UNSAFE,
+					CreateMode.PERSISTENT);
+		} catch (Exception e) {
+			e.printStackTrace();
 		}
 	}
 
-	// Asynchronous callback that is invoked by the zk.getChildren request.
-	public void processResult(int rc, String path, Object ctx, List<String> children) {
+	private void setWatch() {
+		/*
+		 * Set a watch for new jobs.
+		 */
+		try {
+			zk.getChildren("/distXX/tasks", true);
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
 
-		// !! IMPORTANT !!
-		// Do not perform any time consuming/waiting steps here
-		// including in other functions called from here.
-		// Your will be essentially holding up ZK client library
-		// thread and you will not get other notifications.
-		// Instead include another thread in your program logic that
-		// does the time consuming "work" and notify that thread from here.
+	public void startWorking() throws InterruptedException {
+		// This loop does not busy-wait, but gets blocked until a watch event arrives.
+		while (true) {
+			// Keep trying until no more job is available.
+			String jobPath = findAndClaimJob();
+			while (jobPath != null) {
+				// Set watch before retrieving the job list, so that updates will not be missed.
+				// While the same updates might be processed multiple times, each job will be
+				// processed only once. Besides, notice that there is only one thread that
+				// actually does the computation,
+				setWatch();
+				processAndSubmitTask(jobPath);
+				jobPath = findAndClaimJob();
+			}
 
-		// This logic is for manager !!
-		// Every time a new task znode is created by the client, this will be invoked.
+			// Block until a new job arrives (a watch event) and unblocks this loop.
+			synchronized (this) {
+				// We can set as many watch as needed- duplicated ones are okay, too.
+				setWatch();
+				wait();
+			}
+		}
+	}
 
-		// TODO: Filter out and go over only the newly created task znodes.
-		// Also have a mechanism to assign these tasks to a "Worker" process.
-		// The worker must invoke the "compute" function of the Task send by the client.
-		// What to do if you do not have a free worker process?
-		System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
-		for (String c : children) {
-			System.out.println(c);
-			try {
-				// TODO There is quite a bit of worker specific activities here,
-				// that should be moved done by a process function as the worker.
+	public void process(WatchedEvent event) {
+		/*
+		 * Design constraints:
+		 * - each worker should process only one job at a time.
+		 * - job list should be created while atomically setting a new watcher.
+		 */
 
-				// TODO!! This is not a good approach, you should get the data using an async
-				// version of the API.
-				byte[] taskSerial = zk.getData("/distXX/tasks/" + c, false, null);
+		System.out.println("DISTAPP : Event received : " + event);
 
-				// Re-construct our task object.
-				ByteArrayInputStream bis = new ByteArrayInputStream(taskSerial);
-				ObjectInput in = new ObjectInputStream(bis);
-				DistTask dt = (DistTask) in.readObject();
-
-				// Execute the task.
-				// TODO: Again, time consuming stuff. Should be done by some other thread and
-				// not inside a callback!
-				dt.compute();
-
-				// Serialize our Task object back to a byte array!
-				ByteArrayOutputStream bos = new ByteArrayOutputStream();
-				ObjectOutputStream oos = new ObjectOutputStream(bos);
-				oos.writeObject(dt);
-				oos.flush();
-				taskSerial = bos.toByteArray();
-
-				// Store it inside the result node.
-				zk.create("/distXX/tasks/" + c + "/result", taskSerial, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-				// zk.create("/distXX/tasks/"+c+"/result", ("Hello from "+pinfo).getBytes(),
-				// Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-			} catch (NodeExistsException nee) {
-				System.out.println(nee);
-			} catch (KeeperException ke) {
-				System.out.println(ke);
-			} catch (InterruptedException ie) {
-				System.out.println(ie);
-			} catch (IOException io) {
-				System.out.println(io);
-			} catch (ClassNotFoundException cne) {
-				System.out.println(cne);
+		// Manager should be notified if any new znodes are added to tasks.
+		if (event.getType() == Watcher.Event.EventType.NodeChildrenChanged && event.getPath().equals("/distXX/tasks")) {
+			synchronized (this) {
+				// Unblock the worker thread, or not if the worker thread is currently busy,
+				// which won't trigger another computation anyway.
+				notifyAll();
 			}
 		}
 	}
