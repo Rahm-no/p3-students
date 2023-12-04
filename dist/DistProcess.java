@@ -102,7 +102,7 @@ public class DistProcess implements Watcher {
 			String lockPath = String.format("/distXX/tasks/%s/lock", jobName);
 
 			try {
-				zk.create(lockPath, null, null, CreateMode.EPHEMERAL);
+				zk.create(lockPath, null, Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
 				return jobPath;
 			} catch (KeeperException e) {
 				// Job has already been claimed.
@@ -238,9 +238,12 @@ public class DistProcess implements Watcher {
 		// Read the ZooKeeper ensemble information from the environment variable.
 		DistProcess dt = new DistProcess(System.getenv("ZKSERVER"));
 		dt.startProcess();
+		dt.initalize();
 
 		// Replace this with an approach that will make sure that the process is up and
 		// running forever.
-		Thread.sleep(20000);
+		while (true) {
+
+		}
 	}
 }
