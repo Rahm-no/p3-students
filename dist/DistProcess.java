@@ -94,6 +94,7 @@ public class DistProcess implements Watcher {
 		try {
 			jobNames = zk.getChildren("/distXX/tasks", false);
 		} catch (Exception e) {
+			System.out.println("findAndClaimJob: Error getting jobNames");
 			return null;
 		}
 
@@ -102,9 +103,11 @@ public class DistProcess implements Watcher {
 			String lockPath = String.format("/distXX/tasks/%s/lock", jobName);
 
 			try {
+				System.out.println("findAndClaimJob: trying to insert " + lockPath);
 				zk.create(lockPath, null, Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
 				return jobPath;
 			} catch (KeeperException e) {
+				System.out.println("findAndClaimJob: skipping " + lockPath);
 				// Job has already been claimed.
 			} catch (InterruptedException e) {
 				return null;
@@ -196,6 +199,7 @@ public class DistProcess implements Watcher {
 			// Keep trying until no more job is available.
 			String jobPath = findAndClaimJob();
 			while (jobPath != null) {
+				System.out.println("processAndSubmitTask: " + jobPath);
 				// Set watch before retrieving the job list, so that updates will not be missed.
 				// While the same updates might be processed multiple times, each job will be
 				// processed only once. Besides, notice that there is only one thread that
@@ -208,8 +212,10 @@ public class DistProcess implements Watcher {
 			// Block until a new job arrives (a watch event) and unblocks this loop.
 			synchronized (this) {
 				// We can set as many watch as needed- duplicated ones are okay, too.
+				System.out.println("startWorking main loop: Waiting for trigger");
 				setWatch();
 				wait();
+				System.out.println("startWorking main loop: Triggered trigger");
 			}
 		}
 	}
