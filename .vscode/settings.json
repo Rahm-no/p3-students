@@ -1,6 +1,10 @@
 {
     "java.project.referencedLibraries": [
         "lib/**/*.jar",
-        "/home/jacob/apache-zookeeper/lib/zookeeper-3.9.1.jar"
-    ]
+        "/home/jacob/apache-zookeeper-3.8.3-bin/lib/zookeeper-3.8.3.jar",
+        "/home/jacob/apache-zookeeper-3.8.3-bin/lib/zookeeper-jute-3.8.3.jar"
+    ],
+    "files.exclude": {
+        "**/*.class": true
+    }
 }
